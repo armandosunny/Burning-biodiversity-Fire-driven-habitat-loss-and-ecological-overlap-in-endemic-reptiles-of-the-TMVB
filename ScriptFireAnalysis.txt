@@ -1,0 +1,308 @@
+############################################################################################################
+# FIRE–REPTILE INTERACTION ANALYSIS SCRIPT (ENGLISH VERSION)
+# Author: [Your Name]
+# Date: 2025
+# Description: Script for analyzing the spatial relationship between fire intensity and reptile distribution.
+# This script includes:
+#   (1) Clipping raster maps by shapefile boundaries
+#   (2) Overlay and statistical analysis of fire vs. reptile presence
+#   (3) Logistic regressions
+#   (4) Abundance, fragmentation, and diversity (Shannon/Simpson) indices
+############################################################################################################
+
+
+###############################################
+# SECTION 1: CLIPPING MAPS BY SHAPEFILE
+###############################################
+
+# Load required libraries
+library(terra)
+library(sf)
+
+# 1. Set working directory
+setwd("C:/Users/asgar/OneDrive/Desktop/mapaspresenteespecies")
+
+# 2. Define input and output folders
+input_folder <- getwd()
+output_folder <- "C:/Users/asgar/OneDrive/Desktop/mapasrecortados"
+
+# 3. Load the shapefile defining the clipping area
+shapefile_path <- "robertsieje.shp"
+shapefile <- st_read(shapefile_path)
+
+# 4. List all .asc raster files
+asc_files <- list.files(input_folder, pattern = "\\.asc$", full.names = TRUE)
+
+# 5. Clip each raster using the shapefile and save results
+for (asc_file in asc_files) {
+  raster_map <- rast(asc_file)
+  shapefile_projected <- st_transform(shapefile, crs = crs(raster_map))
+  raster_cropped <- crop(raster_map, shapefile_projected)
+  raster_cropped <- mask(raster_cropped, shapefile_projected)
+  output_file <- file.path(output_folder, paste0("cropped_", basename(asc_file)))
+  writeRaster(raster_cropped, output_file, format = "ascii", overwrite = TRUE)
+  cat("Cropped file saved at:", output_file, "\n")
+}
+
+
+############################################################################################################
+# SECTION 2: FIRE VS. REPTILE DISTRIBUTION ANALYSIS
+############################################################################################################
+
+library(terra)
+library(sp)
+library(spdep)
+library(ggplot2)
+library(dplyr)
+
+# Load fire map
+mapa_fuego <- rast("recortado_FIREblock16.asc")
+
+# List all reptile distribution maps
+asc_files <- list.files(getwd(), pattern = "\\.asc$", full.names = TRUE)
+asc_files <- asc_files[!grepl("recortado_FIREblock16", asc_files)]
+
+# Function to analyze each species
+analyze_species <- function(asc_file, mapa_fuego) {
+  cat("Analyzing:", basename(asc_file), "\n")
+  reptile_map <- rast(asc_file)
+  if (crs(mapa_fuego) != crs(reptile_map)) crs(reptile_map) <- crs(mapa_fuego)
+  reduction_factor <- 5
+  mapa_fuego <- aggregate(mapa_fuego, fact = reduction_factor, fun = mean)
+  reptile_map <- aggregate(reptile_map, fact = reduction_factor, fun = mean)
+  fire_vals <- values(mapa_fuego)
+  reptile_vals <- values(reptile_map)
+  valid_indices <- !is.na(reptile_vals) & !is.na(fire_vals)
+  fire_vals <- fire_vals[valid_indices]
+  reptile_vals <- reptile_vals[valid_indices]
+  if (length(fire_vals) < 100 | length(reptile_vals) < 100) {
+    cat("Insufficient valid data for", basename(asc_file), "\n")
+    return(NULL)
+  }
+  fire_categories <- cut(fire_vals, breaks = c(0, 0.25, 0.5, 0.75, 1),
+                         labels = c("Low", "Medium", "High", "Very High"))
+  comparison_table <- table(Fire = fire_categories, Reptiles = reptile_vals)
+  df_comparison <- as.data.frame(comparison_table)
+  p <- ggplot(df_comparison, aes(x = Fire, y = Freq, fill = factor(Reptiles))) +
+    geom_bar(stat = "identity", position = "dodge") +
+    theme_minimal() +
+    labs(title = paste("Reptile distribution vs fire:", basename(asc_file)),
+         x = "Fire category", y = "Number of records", fill = "Reptile presence") +
+    scale_fill_brewer(palette = "Set1") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p)
+  ggsave(filename = paste0("plot_", basename(asc_file), ".png"), width = 10, height = 7)
+  return(df_comparison)
+}
+
+results <- lapply(asc_files, function(file) analyze_species(file, mapa_fuego))
+
+
+############################################################################################################
+# SECTION 3: LOGISTIC REGRESSION
+############################################################################################################
+
+library(terra)
+library(ggplot2)
+
+regression_results <- list()
+
+for (asc_file in asc_files) {
+  if (grepl("recortado_FIREblock16", asc_file)) next
+  reptile_map <- rast(asc_file)
+  fire_vals <- values(mapa_fuego)
+  reptile_vals <- values(reptile_map)
+  valid_indices <- !is.na(fire_vals) & !is.na(reptile_vals)
+  fire_vals <- fire_vals[valid_indices]
+  reptile_vals <- reptile_vals[valid_indices]
+  reptile_binary <- as.integer(reptile_vals > 0)
+  if (length(unique(reptile_binary)) < 2) {
+    cat("Not enough variability in", basename(asc_file), "\n")
+    next
+  }
+  model <- glm(reptile_binary ~ fire_vals, family = binomial)
+  regression_results[[basename(asc_file)]] <- summary(model)
+  ggplot(data = data.frame(fire_vals, reptile_binary), aes(x = fire_vals, y = reptile_binary)) +
+    geom_jitter(width = 0.02, height = 0.05, alpha = 0.5) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial"), color = "blue") +
+    labs(title = paste("Logistic Regression for", basename(asc_file)),
+         x = "Fire Intensity", y = "Reptile Presence") +
+    theme_minimal()
+}
+
+print(regression_results)
+
+
+############################################################################################################
+# SECTION 4: FIRE IMPACT ON REPTILE ABUNDANCE
+############################################################################################################
+
+library(ggplot2)
+library(dplyr)
+
+fire_categories <- cut(fire_vals, breaks = c(0, 0.25, 0.5, 0.75, 1),
+                       labels = c("Low", "Medium", "High", "Very High"))
+df_abundance <- data.frame(Fire = fire_categories, Reptiles = reptile_vals)
+
+df_summary <- df_abundance %>%
+  group_by(Fire) %>%
+  summarise(Average_Abundance = mean(Reptiles, na.rm = TRUE),
+            Total_Reptiles = sum(Reptiles, na.rm = TRUE))
+
+print(df_summary)
+
+ggplot(df_summary, aes(x = Fire, y = Average_Abundance, fill = Fire)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Impact of Fire on Reptile Abundance",
+       x = "Fire Category", y = "Average Reptile Abundance") +
+  scale_fill_brewer(palette = "Reds")
+
+
+############################################################################################################
+# SECTION 5: SPECIES COMPARISON AND HEATMAPS
+############################################################################################################
+
+library(terra)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+mapa_fuego <- rast("recortado_FIREblock16.asc")
+df_abundance_species <- list()
+
+for (asc_file in asc_files) {
+  reptile_map <- rast(asc_file)
+  reptile_map <- resample(reptile_map, mapa_fuego, method = "bilinear")
+  fire_vals <- values(mapa_fuego)
+  reptile_vals <- values(reptile_map)
+  valid_indices <- !is.na(fire_vals) & !is.na(reptile_vals)
+  fire_vals <- fire_vals[valid_indices]
+  reptile_vals <- reptile_vals[valid_indices]
+  fire_categories <- cut(fire_vals, breaks = c(0, 0.25, 0.5, 0.75, 1),
+                         labels = c("Low", "Medium", "High", "Very High"))
+  df_temp <- data.frame(Species = basename(asc_file), Fire = fire_categories, Reptiles = reptile_vals)
+  df_abundance_species[[basename(asc_file)]] <- df_temp
+}
+
+df_abundance_species <- bind_rows(df_abundance_species)
+df_summary <- df_abundance_species %>%
+  group_by(Species, Fire) %>%
+  summarise(Average_Abundance = mean(Reptiles, na.rm = TRUE))
+
+ggplot(df_summary, aes(x = Fire, y = Average_Abundance, fill = Species)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  labs(title = "Impact of Fire on Reptile Abundance by Species",
+       x = "Fire Category", y = "Average Abundance") +
+  scale_fill_brewer(palette = "Set3") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Heatmap
+df_heatmap <- df_summary %>%
+  spread(key = Fire, value = Average_Abundance, fill = 0)
+df_heatmap_long <- gather(df_heatmap, key = "Fire", value = "Abundance", -Species)
+
+ggplot(df_heatmap_long, aes(x = Fire, y = Species, fill = Abundance)) +
+  geom_tile() +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  theme_minimal() +
+  labs(title = "Fire Impact on Reptile Abundance by Species",
+       x = "Fire Category", y = "Species") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+############################################################################################################
+# SECTION 6: HABITAT LOSS AND FRAGMENTATION ANALYSIS
+############################################################################################################
+
+library(landscapemetrics)
+library(terra)
+umbral_presencia <- 0.5
+umbral_fuego <- 0.5
+mapa_fuego_bin <- mapa_fuego
+values(mapa_fuego_bin) <- ifelse(values(mapa_fuego) >= umbral_fuego, 1, 0)
+fragmentation_results <- list()
+
+for (asc_file in asc_files) {
+  reptile_map <- rast(asc_file)
+  reptile_map <- resample(reptile_map, mapa_fuego, method = "bilinear")
+  reptile_map_bin <- reptile_map
+  values(reptile_map_bin) <- ifelse(values(reptile_map) >= umbral_presencia, 1, 0)
+  if (all(is.na(values(reptile_map_bin))) || length(unique(values(reptile_map_bin))) == 1) next
+  patches_before <- tryCatch(lsm_l_np(reptile_map_bin)$value, error = function(e) NA)
+  reptile_fire <- reptile_map_bin * mapa_fuego_bin
+  patches_after <- tryCatch(lsm_l_np(reptile_fire)$value, error = function(e) NA)
+  if (!is.na(patches_before) && !is.na(patches_after)) {
+    fragmentation_results[[basename(asc_file)]] <- data.frame(
+      Species = basename(asc_file),
+      Patches_Before = patches_before,
+      Patches_After = patches_after
+    )
+  }
+}
+
+df_fragmentation <- do.call(rbind, fragmentation_results)
+write.csv(df_fragmentation, "fragmentation_reptiles.csv", row.names = FALSE)
+
+ggplot(df_fragmentation, aes(x = factor(Species))) +
+  geom_line(aes(y = Patches_Before, group = Species, color = "Before Fire"), size = 1) +
+  geom_line(aes(y = Patches_After, group = Species, color = "After Fire"), size = 1) +
+  geom_point(aes(y = Patches_Before, color = "Before Fire"), size = 3) +
+  geom_point(aes(y = Patches_After, color = "After Fire"), size = 3) +
+  theme_minimal() +
+  labs(title = "Habitat Fragmentation Before and After Fire",
+       x = "Species", y = "Number of Patches", color = "Status") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+############################################################################################################
+# SECTION 7: DIVERSITY INDICES (SHANNON, SIMPSON, EVENNESS, RICHNESS)
+############################################################################################################
+
+library(vegan)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+df_diversity <- df_abundance_species %>%
+  group_by(Fire, Species) %>%
+  summarise(Abundance = sum(Reptiles, na.rm = TRUE)) %>%
+  pivot_wider(names_from = Species, values_from = Abundance, values_fill = list(Abundance = 0))
+
+diversity_indices <- df_diversity %>%
+  select(-Fire) %>%
+  apply(1, function(x) {
+    c(
+      Shannon = diversity(x, index = "shannon"),
+      Simpson = diversity(x, index = "simpson"),
+      Evenness = diversity(x, index = "shannon") / log(length(x[x > 0])),
+      Richness = sum(x > 0)
+    )
+  }) %>% t() %>% as.data.frame()
+
+df_diversity_final <- cbind(Fire = df_diversity$Fire, diversity_indices)
+
+print(df_diversity_final)
+
+# Plot each diversity index
+ggplot(df_diversity_final, aes(x = as.factor(Fire), y = Shannon, fill = as.factor(Fire))) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  labs(title = "Shannon Diversity by Fire Category", x = "Fire Category", y = "Shannon Index") +
+  scale_fill_brewer(palette = "Reds")
+
+ggplot(df_diversity_final, aes(x = as.factor(Fire), y = Simpson, fill = as.factor(Fire))) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  labs(title = "Simpson Diversity by Fire Category", x = "Fire Category", y = "Simpson Index") +
+  scale_fill_brewer(palette = "Blues")
+
+ggplot(df_diversity_final, aes(x = as.factor(Fire), y = Evenness, fill = as.factor(Fire))) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  labs(title = "Pielou Evenness by Fire Category", x = "Fire Category", y = "Evenness") +
+  scale_fill_brewer(palette = "Greens")
+
+ggplot(df_diversity_final, aes(x = as.factor(Fire), y = Richness, fill = as.factor(Fire))) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  labs(title = "Species Richness by Fire Category", x = "Fire Category", y = "Number of Species") +
+  scale_fill_brewer(palette = "Purples")

@@ -1,0 +1,113 @@
+
+
+
+
+######################################################### M9 #######################################################################################################
+options(java.parameters = "-Xmx1024m") ## to assign 1 GB of memory to rJava
+options(java.parameters = "-Xmx16g") ### Adjust memory size as needed; 16 GB here can vary depending on requirements and availability.
+
+library(raster)
+library(rgdal)
+library(rJava)
+library(dismo)
+library(ENMeval)
+library(sp)
+
+setwd("D:/MODCON/PRYNOSOMAORBICULARE/incendios")
+
+bv = read.csv("firepointsshpntbm9.csv")
+
+# Convert to data frame
+occs = as.data.frame(bv[,1:2])
+plot(occs)
+
+agri = raster("AgriculturaM9.asc")
+altitud = raster("ALTITUDM9.asc")
+arida = raster("ARIDAM9.asc")
+aspect = raster("ASPECTM9.asc")
+bio5 = raster("bio_5M9.asc")
+bio6 = raster("bio_6M9.asc")
+bio13 = raster("bio_13M9.asc")
+bio14 = raster("bio_14M9.asc")
+encino = raster("ENCINOSINHERBdistM9.asc")
+mesofilo = raster("MESOFILOSINHERBdistM9.asc")
+oyamel = raster("OYAMELdistM9.asc")
+pasto = raster("PASTIZALTODOM9.asc")
+pino = raster("PINOdistM9.asc")
+slope = raster("SLOPEM9.asc")
+
+envs = stack(agri, altitud, arida, aspect, altitud, bio5, bio6, bio13, bio14, encino, mesofilo, oyamel, pasto, pino, slope)
+
+# Plot the first layer
+plot(envs[[1]], main = names(envs)[1])
+
+# Overlay points on the raster layers
+points(occs)
+
+library(sp)
+
+# Convert the data frame of points into a spatial object
+occs.sp = SpatialPoints(occs)
+
+library(ENMeval)
+
+# Generate 30,000 random background points across environmental variables
+bg = randomPoints(envs, n = 30000)
+plot(bg)
+
+# Convert to data frame
+bg = as.data.frame(bg)
+
+# Visualize background points to check for homogeneous spatial distribution
+plot(envs[[1]], legend = FALSE)
+points(bg, col = 'red')
+
+blocks = get.block(occs, bg)
+str(blocks)
+plot(envs[[1]], col = 'gray', legend = FALSE)
+points(occs, pch = 21, bg = blocks$bg.grp)
+
+block = get.block(occs, bg)
+mapblock = evalplot.grps(pts = occs, pts.grp = block$occs.grp, envs = envs[[2]])
+mapblock
+
+
+#### Models evaluated ####
+
+eval2 = ENMevaluate(occs, envs, bg, method = "block", RMvalues = seq(1, 2),
+                    fc = c("L","H","LQ","LQP","LQH","LQHP","LQHPT"),
+                    algorithm = "maxent.jar", parallel = TRUE)
+
+results = eval2@results
+write.csv(results, "FIRE_results_block2.csv")
+
+AIC = eval2@results[which(eval2@results$delta.AICc == 0),]
+write.csv(AIC, "FIRE_AIC_block2.csv")
+
+aic.opt = eval2@models[[which(eval2@results$delta.AICc == 0)]]
+thresholds = aic.opt@results
+write.csv(thresholds, "FIRE_thresholds_block2.csv")
+
+contributions = var.importance(aic.opt)
+write.csv(contributions, "FIRE_contributions_block2.csv")
+
+coefficients = aic.opt@lambdas
+write.csv(coefficients, "FIRE_coefficients_block2.csv")
+
+df = var.importance(aic.opt)
+barplot(df$permutation.importance, names.arg = df$variable, las = 2, ylab = "Permutation Importance")
+barplot(df$percent.contribution, names.arg = df$variable, las = 2, ylab = "Percent Contribution")
+
+response(aic.opt)
+aic.opt # Displays results similar to those in MaxEnt
+
+
+#### Plot map with the lowest AIC value ####
+mapblock = predict(eval2@models[[13]], envs, args = c("outputformat=logistic")) # Manually change the model number if needed
+writeRaster(mapblock, "FIRE_block162.asc")
+
+plot(mapblock)
+library(prettymapr)
+addscalebar()
+prettymap(mapblock, title = "FIREblock")
+addnortharrow()

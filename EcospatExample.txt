@@ -1,0 +1,163 @@
+############################################################################################################
+# NICHE OVERLAP ANALYSIS USING ECOSPAT
+# Reference: Broennimann et al.
+# Purpose: Compare ecological niches in environmental space between two reptile species.
+############################################################################################################
+
+# Load required libraries
+library(ecospat)    # Niche comparison in environmental space (Broennimann et al.)
+library(raster)     # Raster manipulation
+library(dismo)      # Distribution modeling tools
+library(grDevices)  # For additional plotting functions
+library(gtools)     # For importing all .asc files
+library(ade4)       # For PCA and multivariate analysis
+
+
+# Set working directory
+setwd("C:/Users/asgar/OneDrive/Desktop/basescsvreptiles/validados")
+
+# Load occurrence data
+aa <- read.csv('cordfuego2022NTB.csv', header = TRUE)
+ad <- read.csv('aeneus.csv', header = TRUE)
+
+# Load climatic variables
+list.asc = mixedsort(list.files(pattern = ".asc"))
+varclim = stack(list.asc)
+
+# Generate a table with environmental values for each pixel (x, y coordinates)
+climpunto <- rasterToPoints(varclim[[1]], fun = NULL, spatial = TRUE)
+
+# Extract environmental data from all layers in varclim for each coordinate
+clim <- extract(varclim, climpunto)
+
+# Format as a standard data frame with x and y as first two columns
+clim <- data.frame(coordinates(climpunto), clim)
+
+# Exclude points that are closer than 5 km apart
+# 1 degree ≈ 111 km → 5 km ≈ 0.045 degrees
+# For 1 km ≈ 0.009 degrees
+
+### IMPORTANT: The input CSV files must have (X, Y) as coordinate columns, not (LAT, LONG) ###
+occ.sp1 <- ecospat.occ.desaggregation(xy = aa, min.dist = 0.00027, by = NULL)
+occ.sp2 <- ecospat.occ.desaggregation(xy = ad, min.dist = 0.00027, by = NULL)
+
+# Add climatic variables to occurrence data
+occ_sp1 <- na.exclude(ecospat.sample.envar(dfsp = occ.sp1, colspxy = 1:2, colspkept = 1:2,
+                                           dfvar = clim, colvarxy = 1:2, colvar = "all", resolution = 0.1))
+
+occ_sp2 <- na.exclude(ecospat.sample.envar(dfsp = occ.sp2, colspxy = 1:2, colspkept = 1:2,
+                                           dfvar = clim, colvarxy = 1:2, colvar = "all", resolution = 0.1))
+
+# Species list
+sp.list <- c('truchas', 'eximia')
+
+# Number of occurrences per species
+sp.nbocc <- c(102169, 122)
+
+# Variables to include in the analysis
+Xvar <- c(1:14)
+nvar <- length(Xvar)
+
+# Number of iterations
+iterations <- 10
+
+# Environmental space resolution
+R = 100
+
+
+############################################################################################################
+# PCA-ENVIRONMENT (Principal Component Analysis in Environmental Space)
+############################################################################################################
+
+# Combine datasets: entire study area + both species occurrences
+data <- rbind(clim[, 1:15], occ_sp1[, 1:15], occ_sp2[, 1:15])
+# Order: first climate data, then species 1, then species 2
+
+# Weight vector: 1 for background (study area), 0 for occurrences
+w <- c(rep(1, nrow(clim)), rep(0, nrow(occ_sp1)), rep(0, nrow(occ_sp2)))
+
+head(data)
+dim(data)
+
+# PCA is calibrated using environmental background only
+# Species occurrences are projected onto PCA axes but not used for calibration
+pca.cal <- dudi.pca(data, row.w = w, center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+
+
+############################################################################################################
+# Define rows corresponding to background and species data
+############################################################################################################
+
+row.clim <- 1:nrow(clim)
+row.sp1 <- (1 + nrow(clim)):(nrow(clim) + nrow(occ_sp1))
+row.sp2 <- (1 + nrow(clim) + nrow(occ_sp1)):(nrow(clim) + nrow(occ_sp1) + nrow(occ_sp2))
+
+# Extract PCA coordinates for the study area and each species
+scores.clim <- pca.cal$li[row.clim, ]   # Background
+scores.sp1  <- pca.cal$li[row.sp1, ]    # Species 1
+scores.sp2  <- pca.cal$li[row.sp2, ]    # Species 2
+
+scores.sp1 <- na.omit(scores.sp1)
+scores.sp2 <- na.omit(scores.sp2)
+
+# Contribution of each variable to PCA components
+ecospat.plot.contrib(contrib = pca.cal$co, eigen = pca.cal$eig)
+
+# Calculate niche overlap metrics (D = Schoener’s D, I = Warren’s I)
+############################################################################################################
+# OCCURRENCE DENSITY SURFACES IN ENVIRONMENTAL SPACE
+############################################################################################################
+
+# Generate occurrence density surfaces (using first two PCA axes)
+z1 <- ecospat.grid.clim.dyn(scores.clim, scores.clim, scores.sp1, R = 100)
+z2 <- ecospat.grid.clim.dyn(scores.clim, scores.clim, scores.sp2, R = 100)
+
+# Compute niche overlap metrics
+ecospat.niche.overlap(z1, z2, cor = TRUE)
+
+# Plot niche density in PCA environmental space
+ecospat.plot.niche(z1, title = "fire", name.axis1 = "PC1", name.axis2 = "PC2", cor = FALSE)
+ecospat.plot.niche(z2, title = "avenues", name.axis1 = "PC1", name.axis2 = "PC2", cor = FALSE)
+
+
+############################################################################################################
+# NICHE EQUIVALENCY TEST
+############################################################################################################
+
+# Test if niches are identical (time-consuming)
+# This test randomizes species identities among occurrence points.
+# Null hypothesis: niches are identical — rejected if observed I < expected under null model.
+a.dyn <- ecospat.niche.equivalency.test(z1, z2, rep = 100)
+
+# Plot the results of the equivalency test
+ecospat.plot.overlap.test(a.dyn, "D", "Equivalency")
+
+
+############################################################################################################
+# NICHE SIMILARITY TEST
+############################################################################################################
+
+# Test whether niches are more or less similar than expected by chance.
+# The test randomizes one species’ occurrences within the environmental background
+# while keeping the other species fixed.
+# Null hypothesis: observed differences are due to environmental distribution alone.
+# Rejected if observed overlap is higher or lower than expected under the null model.
+b.dyn <- ecospat.niche.similarity.test(z1, z2 = z2, rep = 100)
+
+# NOTE: For invasive species or cases with distinct geographic areas,
+# a separate test must be run for each species.
+
+# Plot similarity test results
+ecospat.plot.overlap.test(b.dyn, "D", "Similarity")
+
+
+############################################################################################################
+# MULTIPLE NICHE COMPARISON VISUALIZATION
+############################################################################################################
+
+# Plot multiple niches on the same PCA space for visual comparison
+ecospat.plot.niche.dyn(z1, z2, quant = 0.5, title = "Fire vs aeneus", 
+                       name.axis1 = "PC1", name.axis2 = "PC2", interest = 1)
+
+ecospat.plot.niche.dyn(z1, z2, quant = 0.5, title = "Fire vs aeneus", 
+                       name.axis1 = "PC1", name.axis2 = "PC2", interest = 2)

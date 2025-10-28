@@ -1,0 +1,30 @@
+############################################################################################################
+# RASTER CLIPPING BY STUDY AREA SHAPEFILE
+# Description:
+# This script clips all .asc raster files in a folder using a shapefile as the mask.
+# It is useful for preparing environmental variables restricted to a specific study area.
+############################################################################################################
+
+# Load library
+library(terra)
+
+# Define working directory (optional if already in the correct one)
+setwd("C:/Users/asgar/OneDrive/Desktop/RESPALDOS2025B/mp85bi50")
+
+# Read shapefile
+shape <- vect("M_areastudio.shp")  # Replace with your shapefile name
+
+# List all .asc files in the folder
+asc_files <- list.files(pattern = "\\.asc$", full.names = TRUE)
+
+# Create a folder for cropped rasters (optional)
+dir.create("recortes", showWarnings = FALSE)
+
+# Iterate through each file and perform cropping
+for (file in asc_files) {
+  layer <- rast(file)  # Load raster layer
+  layer_cropped <- crop(layer, shape) |> mask(shape)  # Crop and apply mask
+  output_name <- file.path("recortes", paste0("cropped_", basename(file)))
+  writeRaster(layer_cropped, output_name, overwrite = TRUE)
+  cat("Cropped layer saved:", output_name, "\n")
+}
